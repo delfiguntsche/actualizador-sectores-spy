@@ -4,15 +4,17 @@ import yfinance as yf
 from datetime import datetime
 from io import StringIO
 
-# 1. Traer lista de empresas del S&P 500 y su sector oficial
+# 1. Traer lista oficial de empresas del S&P 500 y su sector desde Wikipedia
 url_wiki = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-resp = requests.get(url_wiki, headers={"User-Agent": "Mozilla/5.0"})
+resp = requests.get(url_wiki, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
 tabla_sp500 = pd.read_html(StringIO(resp.text))[0]
+
 tabla_sp500['Ticker'] = tabla_sp500['Symbol'].str.replace('.', '-', regex=False)
-mapa_sectores = dict(zip(tabla_sp500['Ticker'], tabla_sp500['GICS Sector']))
+info_empresas = tabla_sp500[['Ticker', 'Security', 'GICS Sector']].copy()
+info_empresas.columns = ['Ticker', 'Empresa', 'Sector']
 
 # 2. Consultar Market Cap en bloques de 100
-tickers = list(mapa_sectores.keys())
+tickers = info_empresas['Ticker'].tolist()
 market_caps = {}
 
 for i in range(0, len(tickers), 100):
@@ -26,12 +28,29 @@ for i in range(0, len(tickers), 100):
         except Exception:
             pass
 
-# 3. Calcular los porcentajes sectoriales
+# 3. Calcular ponderaciones individuales por empresa
 df_mc = pd.DataFrame(list(market_caps.items()), columns=['Ticker', 'MarketCap'])
-df_mc['Sector'] = df_mc['Ticker'].map(mapa_sectores).str.strip().str.lower()
-sectores = (df_mc.groupby('Sector')['MarketCap'].sum() / df_mc['MarketCap'].sum() * 100).to_dict()
+df_emp_mes = pd.merge(info_empresas, df_mc, on='Ticker', how='inner')
 
-nuevos_datos = {
+total_mc = df_emp_mes['MarketCap'].sum()
+df_emp_mes['Ponderacion_%'] = (df_emp_mes['MarketCap'] / total_mc * 100).round(4)
+
+if len(df_emp_mes) < 480 or df_emp_mes['Ponderacion_%'].sum() < 95:
+    raise ValueError(f"Error: Solo se leyeron {len(df_emp_mes)} empresas.")
+
+mes_actual = datetime.now().strftime('%Y-%m')
+
+# Preparar tabla de Empresas del mes
+df_emp_final_mes = df_emp_mes[['Ticker', 'Empresa', 'Sector', 'Ponderacion_%']].copy()
+df_emp_final_mes.insert(0, 'Fecha', mes_actual)
+df_emp_final_mes = df_emp_final_mes.sort_values(by='Ponderacion_%', ascending=False).reset_index(drop=True)
+
+# 4. Calcular ponderaciones por Sector (agrupando desde el mismo cálculo)
+df_emp_mes['Sector_norm'] = df_emp_mes['Sector'].str.strip().str.lower()
+sectores = (df_emp_mes.groupby('Sector_norm')['MarketCap'].sum() / total_mc * 100).to_dict()
+
+nuevos_datos_sec = {
+    'Fecha': mes_actual,
     'Real Estate': round(sectores.get('real estate', 0), 2),
     'Materials': round(sectores.get('materials', 0), 2),
     'Utilities': round(sectores.get('utilities', 0), 2),
@@ -44,29 +63,36 @@ nuevos_datos = {
     'Communication Services': round(sectores.get('communication services', 0), 2),
     'Information Technology': round(sectores.get('information technology', 0), 2),
 }
-nuevos_datos['Total'] = round(sum(nuevos_datos.values()), 2)
+nuevos_datos_sec['Total'] = round(sum(v for k, v in nuevos_datos_sec.items() if k != 'Fecha'), 2)
 
-# Validación de seguridad
-if nuevos_datos['Total'] < 95:
-    raise ValueError(f"Error: Suma dio {nuevos_datos['Total']}%")
-
-# 4. Leer el Excel del repositorio y actualizarlo
+# 5. Leer el Excel existente (Hoja 1 = Sectores, y Hoja 'Empresas' si ya existe)
 archivo_excel = "SP500_Sectores_Historico.xlsx"
-df_hist = pd.read_excel(archivo_excel)
-df_hist = df_hist.loc[:, ~df_hist.columns.str.contains('^Unnamed')]
-df_hist['Fecha'] = df_hist['Fecha'].astype(str).str.strip()
+excel_file = pd.ExcelFile(archivo_excel)
 
-mes_actual = datetime.now().strftime('%Y-%m')
-nuevos_datos['Fecha'] = mes_actual
+# Actualizar pestaña Sectores (siempre lee la primera hoja, sin importar cómo se llamara antes)
+df_sec_hist = pd.read_excel(excel_file, sheet_name=0)
+df_sec_hist = df_sec_hist.loc[:, ~df_sec_hist.columns.str.contains('^Unnamed')]
+df_sec_hist['Fecha'] = df_sec_hist['Fecha'].astype(str).str.strip()
 
-if mes_actual in df_hist['Fecha'].values:
-    for col, val in nuevos_datos.items():
-        df_hist.loc[df_hist['Fecha'] == mes_actual, col] = val
-    print(f"Fila {mes_actual} actualizada.")
+if mes_actual in df_sec_hist['Fecha'].values:
+    for col, val in nuevos_datos_sec.items():
+        df_sec_hist.loc[df_sec_hist['Fecha'] == mes_actual, col] = val
 else:
-    nueva_fila = pd.DataFrame([nuevos_datos])[df_hist.columns]
-    df_hist = pd.concat([df_hist, nueva_fila], ignore_index=True)
-    print(f"Nueva fila {mes_actual} agregada.")
+    nueva_fila = pd.DataFrame([nuevos_datos_sec])[df_sec_hist.columns]
+    df_sec_hist = pd.concat([df_sec_hist, nueva_fila], ignore_index=True)
 
-# 5. Sobrescribir el mismo archivo Excel
-df_hist.to_excel(archivo_excel, index=False)
+# Actualizar pestaña Empresas (si ya existía de meses anteriores, combina; si no, la crea)
+if 'Empresas' in excel_file.sheet_names:
+    df_emp_hist = pd.read_excel(excel_file, sheet_name='Empresas')
+    df_emp_hist['Fecha'] = df_emp_hist['Fecha'].astype(str).str.strip()
+    df_emp_hist = df_emp_hist[df_emp_hist['Fecha'] != mes_actual]
+    df_emp_hist = pd.concat([df_emp_hist, df_emp_final_mes], ignore_index=True)
+else:
+    df_emp_hist = df_emp_final_mes
+
+# 6. Guardar ambas pestañas dentro del MISMO archivo Excel
+with pd.ExcelWriter(archivo_excel, engine='openpyxl') as writer:
+    df_sec_hist.to_excel(writer, sheet_name='Sectores', index=False)
+    df_emp_hist.to_excel(writer, sheet_name='Empresas', index=False)
+
+print(f"Actualizado {mes_actual}: Sectores OK | {len(df_emp_final_mes)} empresas guardadas en la pestaña 'Empresas'.")
