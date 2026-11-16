@@ -1,0 +1,38 @@
+name: Actualizacion CNN Fear and Greed
+
+on:
+  # Se ejecuta todos los viernes a las 22:05 UTC (19:05 hs Argentina / 17:05 NY)
+  # Como el script descarga todo el historial diario disponible y lo fusiona sin duplicados,
+  # cada viernes deja registrados todos los días hábiles de la semana.
+  schedule:
+    - cron: '5 22 * * 5'
+  workflow_dispatch: # Mantiene el botón manual por si quieres correrlo en cualquier momento
+
+permissions:
+  contents: write
+
+jobs:
+  actualizar_fg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar archivos del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar librerías necesarias
+        run: pip install pandas requests openpyxl
+
+      - name: Ejecutar script de CNN Fear & Greed
+        run: python actualizar_fg.py
+
+      - name: Guardar el Excel actualizado en GitHub
+        run: |
+          git config user.name "Bot Actualizador"
+          git config user.email "bot@users.noreply.github.com"
+          git add CNN_Fear_and_Greed_Historico.xlsx
+          git commit -m "Actualización semanal CNN Fear & Greed" || exit 0
+          git push
