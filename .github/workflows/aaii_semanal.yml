@@ -1,0 +1,37 @@
+name: Actualizacion Semanal AAII Sentiment
+
+on:
+  # Se ejecuta todos los jueves a las 16:00 UTC (13:00 hs Argentina / 11:00 NY)
+  # AAII publica los resultados nuevos cada jueves por la mañana.
+  schedule:
+    - cron: '0 16 * * 4'
+  workflow_dispatch: # Botón manual para probarlo cuando quieras
+
+permissions:
+  contents: write
+
+jobs:
+  actualizar_aaii:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar archivos del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar librerías necesarias
+        run: pip install pandas requests openpyxl xlrd lxml html5lib
+
+      - name: Ejecutar script de AAII Sentiment
+        run: python actualizar_aaii.py
+
+      - name: Guardar el Excel actualizado en GitHub
+        run: |
+          git config user.name "Bot Actualizador"
+          git config user.email "bot@users.noreply.github.com"
+          git add AAII_Sentiment_Historico.xlsx
+          git commit -m "Actualización semanal AAII Sentiment Survey" || exit 0
+          git push
